@@ -1,0 +1,110 @@
+---
+- name: Converge a new MicroCloud cluster with any number of nodes
+  hosts: microcloud
+  become: true
+  gather_facts: true
+  # strategy: free
+
+  vars:
+    preseed_local: preseed.yaml
+    preseed_remote: /var/tmp/preseed.yaml
+
+    snaps:
+      - microcloud
+      - microceph
+      - microovn
+      - lxd
+
+    # Set up the channel for the group of snaps, per the docs
+    # https://documentation.ubuntu.com/microcloud/stable/microcloud/how-to/install/#installation
+    snap_channel: stable
+    snap_cohort: "+"
+
+  tasks:
+
+  #####################################################################
+  # Optional: Clean out the cluster nodes for idempotent runs 
+  #####################################################################
+
+  - name: Attempt MicroCloud reset
+    command: microcloud reset --force
+    ignore_errors: true
+    changed_when: false
+
+  - name: Stop snaps if running
+    command: snap stop {{ item }}
+    loop: "{{ snaps }}"
+    ignore_errors: true
+    changed_when: false
+
+  - name: Remove snaps
+    command: snap remove {{ item }} --purge
+    loop: "{{ snaps }}"
+    ignore_errors: true
+    changed_when: false
+
+  - name: Remove leftover snap state
+    file:
+      path: "/var/snap/{{ item }}"
+      state: absent
+    loop: "{{ snaps }}"
+
+  #####################################################################
+  # Install the required snaps: microcloud, microceph, microovn, lxd
+  #####################################################################
+
+  - name: Install snaps with cohort
+    command: >
+      snap install {{ item }}
+      --channel={{ snap_channel }}
+      --cohort={{ snap_cohort }}
+    args:
+      creates: "/snap/{{ item }}/current"
+    loop: "{{ snaps }}"
+
+  #####################################################################
+  # Wait for MicroCloud daemon to become active and ready
+  #####################################################################
+
+  - name: Wait for microcloud daemon to reach a ready state
+    shell: snap services microcloud | grep microcloud.daemon | grep active
+    register: daemon_ready
+    retries: 10
+    # Tune this depending on how many nodes you're converging, I tested
+    # up to 15 simultaneous, concurrent nodes
+    delay: 50
+    until: daemon_ready.rc == 0
+    changed_when: false
+
+  #####################################################################
+  # Copy preseed configuration
+  #####################################################################
+
+  - name: Copy preseed file to all nodes
+    copy:
+      src: "{{ preseed_local }}"
+      dest: "{{ preseed_remote }}"
+      mode: "0644"
+
+  #####################################################################
+  # Bootstrap the cluster (this must run on all nodes concurrently)
+  #####################################################################
+
+  - name: A little synchronization barrier before beginning bootstrap
+    pause:
+      seconds: 15
+
+  - name: Run MicroCloud bootstrap on all nodes
+    shell: microcloud preseed < {{ preseed_remote }}
+    register: bootstrap
+    changed_when: false
+
+  #####################################################################
+  # Show cluster status
+  #####################################################################
+
+  - name: Show cluster status
+    command: microcloud status
+    run_once: true
+    delegate_to: "{{ groups['microcloud'][0] }}"
+
