@@ -3,7 +3,7 @@
   hosts: microcloud
   become: true
   gather_facts: true
-  # strategy: free
+  strategy: linear
 
   vars:
     preseed_local: preseed.yaml
@@ -25,12 +25,6 @@
   #####################################################################
   # Optional: Clean out the cluster nodes for idempotent runs 
   #####################################################################
-
-  - name: Attempt MicroCloud reset
-    command: microcloud reset --force
-    ignore_errors: true
-    changed_when: false
-
   - name: Stop snaps if running
     command: snap stop {{ item }}
     loop: "{{ snaps }}"
@@ -52,7 +46,6 @@
   #####################################################################
   # Install the required snaps: microcloud, microceph, microovn, lxd
   #####################################################################
-
   - name: Install snaps with cohort
     command: >
       snap install {{ item }}
@@ -65,44 +58,71 @@
   #####################################################################
   # Wait for MicroCloud daemon to become active and ready
   #####################################################################
-
   - name: Wait for microcloud daemon to reach a ready state
-    shell: snap services microcloud | grep microcloud.daemon | grep active
-    register: daemon_ready
-    retries: 10
-    # Tune this depending on how many nodes you're converging, I tested
-    # up to 15 simultaneous, concurrent nodes
-    delay: 50
-    until: daemon_ready.rc == 0
+    command: snap services microcloud
+    register: daemon_services
+    retries: 30
+    delay: 30
+    until: "'microcloud.daemon' in daemon_services.stdout and 'active' in daemon_services.stdout"
     changed_when: false
 
   #####################################################################
-  # Copy preseed configuration
+  # Start bootstrap session on initiator
   #####################################################################
-
-  - name: Copy preseed file to all nodes
-    copy:
-      src: "{{ preseed_local }}"
-      dest: "{{ preseed_remote }}"
-      mode: "0644"
+  - name: Start MicroCloud bootstrap session
+    shell: microcloud preseed
+    args:
+      stdin: "{{ lookup('file', preseed_local) }}"
+    async: 1800
+    poll: 0
+    register: bootstrap_job
+    when: inventory_hostname == groups['microcloud'][0]
 
   #####################################################################
-  # Bootstrap the cluster (this must run on all nodes concurrently)
+  # Wait for session creation
   #####################################################################
+  - name: Wait for MicroCloud API
+    wait_for:
+      host: "{{ hostvars[groups['microcloud'][0]].ansible_host }}"
+      port: 9443
+      timeout: 60
+    delegate_to: localhost
+    become: false
+    run_once: true
 
-  - name: A little synchronization barrier before beginning bootstrap
+  #####################################################################
+  # Join remaining nodes
+  #####################################################################
+  - name: Give bootstrap session time to initialize
     pause:
-      seconds: 15
+      seconds: 10
+    run_once: true
 
-  - name: Run MicroCloud bootstrap on all nodes
-    shell: microcloud preseed < {{ preseed_remote }}
-    register: bootstrap
-    changed_when: false
+  - name: Join MicroCloud cluster
+    shell: microcloud preseed
+    args:
+      stdin: "{{ lookup('file', preseed_local) }}"
+    when: inventory_hostname != groups['microcloud'][0]
+    register: bootstrap_join
+    retries: 30
+    delay: 30
+    until: bootstrap_join.rc == 0
+
+  #####################################################################
+  # Wait for the initiator to settle
+  #####################################################################
+  - name: Wait for bootstrap to finish on initiator
+    async_status:
+      jid: "{{ bootstrap_job.ansible_job_id }}"
+    register: bootstrap_result
+    until: bootstrap_result.finished
+    retries: 30
+    delay: 30
+    when: inventory_hostname == groups['microcloud'][0]
 
   #####################################################################
   # Show cluster status
   #####################################################################
-
   - name: Show cluster status
     command: microcloud status
     run_once: true
