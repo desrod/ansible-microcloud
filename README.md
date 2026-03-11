@@ -38,6 +38,12 @@ cluster.
 
 ------------------------------------------------------------------------
 
+
+
+https://github.com/user-attachments/assets/a1a326f0-abbb-4996-a824-5bdd1b948a48
+
+
+
 # Why did I write this
 
 MicroCloud requires a fairly detailed `preseed.yaml` describing:
